@@ -4,7 +4,6 @@ use std::fs::File;
 use std::io::{self, BufReader, Read};
 use md5;
 use rusqlite::{params, Connection, Result};
-// use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -53,8 +52,23 @@ fn process_directory(conn: &Connection, path: &str) -> Result<(), std::io::Error
             process_directory(conn, &path.to_string_lossy())?;
         } else {
             let (path_str, hash_str) = process_file(&entry)?;
-            upsert_file_hash(conn, &path_str, &hash_str).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-            println!("Processed {}: {}", path_str, hash_str);
+
+            let query = conn.query_row(
+                "SELECT hash FROM file_hashes WHERE path = ?1",
+                params![path_str],
+                |row| row.get::<_, String>(0),
+            );
+
+            match query {
+                Ok(existing_hash) => {
+                    println!("Skipped {}: {}", path_str, existing_hash);
+                }
+                Err(_) => {
+                    upsert_file_hash(conn, &path_str, &hash_str)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                    println!("Processed {}: {}", path_str, hash_str);
+                }
+            }
         }
     }
     Ok(())
