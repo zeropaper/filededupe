@@ -22,7 +22,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "CREATE TABLE IF NOT EXISTS file_hashes (
              id INTEGER PRIMARY KEY,
              path TEXT NOT NULL UNIQUE,
-             hash TEXT NOT NULL
+             hash TEXT NOT NULL,
+             size INTEGER NOT NULL
          )",
         [],
     )?;
@@ -34,11 +35,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn upsert_file_hash(conn: &Connection, path: &str, hash: &str) -> Result<(), rusqlite::Error> {
+fn upsert_file_hash(conn: &Connection, path: &str, hash: &str, size: i64) -> Result<(), rusqlite::Error> {
     conn.execute(
-        "INSERT INTO file_hashes (path, hash) VALUES (?1, ?2)
-         ON CONFLICT(path) DO UPDATE SET hash = excluded.hash",
-        params![path, hash],
+        "INSERT INTO file_hashes (path, hash, size) VALUES (?1, ?2, ?3)
+         ON CONFLICT(path) DO UPDATE SET hash = excluded.hash, size = excluded.size",
+        params![path, hash, size],
     )?;
     Ok(())
 }
@@ -64,7 +65,8 @@ fn process_directory(conn: &Connection, path: &str) -> Result<(), std::io::Error
                     println!("Skipped {}: {}", path_str, existing_hash);
                 }
                 Err(_) => {
-                    upsert_file_hash(conn, &path_str, &hash_str)
+                    let size = entry.metadata()?.len() as i64;
+                    upsert_file_hash(conn, &path_str, &hash_str, size)
                         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
                     println!("Processed {}: {}", path_str, hash_str);
                 }
