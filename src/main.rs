@@ -27,6 +27,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          )",
         [],
     )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_path ON file_hashes(path)",
+        [],
+    )?;
 
     if let Err(e) = process_directory(&conn, directory) {
         println!("Error: {}", e);
