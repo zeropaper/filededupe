@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let db_path = dirs::home_dir().unwrap().join(".filededupe.db");
     println!("Using database: {}", db_path.to_string_lossy());
-    let conn = Connection::open(db_path)?;
+    let mut conn = Connection::open(db_path)?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS file_hashes (
@@ -34,23 +34,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [],
     )?;
 
-    if let Err(e) = process_directory(&conn, directory) {
+    if let Err(e) = process_directory(&mut conn, directory) {
         println!("Error: {}", e);
     }
 
     Ok(())
 }
 
-fn upsert_file_hash(conn: &Connection, path: &str, hash: &str, size: i64) -> Result<(), rusqlite::Error> {
-    conn.execute(
-        "INSERT INTO file_hashes (path, hash, size) VALUES (?1, ?2, ?3)
-         ON CONFLICT(path) DO UPDATE SET hash = excluded.hash, size = excluded.size",
-        params![path, hash, size],
-    )?;
+fn upsert_file_hashes(conn: &mut Connection, files: &[(String, String, i64)]) -> Result<(), rusqlite::Error> {
+    let tx = conn.transaction()?;
+
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO file_hashes (path, hash, size) VALUES (?1, ?2, ?3)
+             ON CONFLICT(path) DO UPDATE SET hash = excluded.hash, size = excluded.size",
+        )?;
+
+        for (path, hash, size) in files {
+            stmt.execute(params![path, hash, size])?;
+        }
+    }
+
+    tx.commit()?;
     Ok(())
 }
 
-fn process_directory(conn: &Connection, path: &str) -> Result<(), std::io::Error> {
+fn process_directory(conn: &mut Connection, path: &str) -> Result<(), std::io::Error> {
     let mut file_data_batch = Vec::new();
 
     for entry in fs::read_dir(path)? {
@@ -99,12 +108,16 @@ fn compute_file_hash(path: &str) -> Result<String, io::Error> {
     Ok(format!("{:x}", hash))
 }
 
-fn process_files_batch(conn: &Connection, batch: &[(String, i64)]) -> Result<(), std::io::Error> {
+fn process_files_batch(conn: &mut Connection, batch: &[(String, i64)]) -> Result<(), std::io::Error> {
+    let mut file_hashes = Vec::new();
+
     for (path, size) in batch {
         let hash = compute_file_hash(path)?;
-        upsert_file_hash(conn, path, &hash, *size)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        file_hashes.push((path.clone(), hash, *size));
     }
+
+    upsert_file_hashes(conn, &file_hashes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
     Ok(())
 }
