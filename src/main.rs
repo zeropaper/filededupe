@@ -1,9 +1,11 @@
 use std::env;
-use std::fs::{self, DirEntry};
+use std::fs::{self};
 use std::fs::File;
 use std::io::{self, BufReader, Read};
 use md5;
 use rusqlite::{params, Connection, Result};
+
+const BATCH_SIZE: usize = 20;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
@@ -15,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let directory = &args[1];
 
     let db_path = dirs::home_dir().unwrap().join(".filededupe.db");
-    print!("Using database: {}", db_path.to_string_lossy());
+    println!("Using database: {}", db_path.to_string_lossy());
     let conn = Connection::open(db_path)?;
 
     conn.execute(
@@ -49,40 +51,38 @@ fn upsert_file_hash(conn: &Connection, path: &str, hash: &str, size: i64) -> Res
 }
 
 fn process_directory(conn: &Connection, path: &str) -> Result<(), std::io::Error> {
+    let mut file_data_batch = Vec::new();
+
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let path = entry.path();
 
         if path.is_dir() {
+            println!("Processing directory: {}", path.to_string_lossy());
             process_directory(conn, &path.to_string_lossy())?;
         } else {
-            let (path_str, hash_str) = process_file(&entry)?;
+            println!("Processing file: {}", path.to_string_lossy());
+            let metadata = entry.metadata()?;
+            let file_data = (path.to_string_lossy().into_owned(), metadata.len() as i64);
+            file_data_batch.push(file_data);
 
-            let query = conn.query_row(
-                "SELECT hash FROM file_hashes WHERE path = ?1",
-                params![path_str],
-                |row| row.get::<_, String>(0),
-            );
-
-            match query {
-                Ok(existing_hash) => {
-                    println!("Skipped {}: {}", path_str, existing_hash);
-                }
-                Err(_) => {
-                    let size = entry.metadata()?.len() as i64;
-                    upsert_file_hash(conn, &path_str, &hash_str, size)
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-                    println!("Processed {}: {}", path_str, hash_str);
-                }
+            if file_data_batch.len() >= BATCH_SIZE {
+                process_files_batch(conn, &file_data_batch)?;
+                file_data_batch.clear();
             }
         }
     }
+
+    if !file_data_batch.is_empty() {
+        println!("Processing remaining files");
+        process_files_batch(conn, &file_data_batch)?;
+    }
+
     Ok(())
 }
 
-fn process_file(entry: &DirEntry) -> Result<(String, String), io::Error> {
-    let path = entry.path();
-    let file = File::open(&path)?;
+fn compute_file_hash(path: &str) -> Result<String, io::Error> {
+    let file = File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut context = md5::Context::new();
 
@@ -96,7 +96,15 @@ fn process_file(entry: &DirEntry) -> Result<(String, String), io::Error> {
     }
 
     let hash = context.compute();
-    let hash_string = format!("{:x}", hash);
+    Ok(format!("{:x}", hash))
+}
 
-    Ok((path.to_string_lossy().into_owned(), hash_string))
+fn process_files_batch(conn: &Connection, batch: &[(String, i64)]) -> Result<(), std::io::Error> {
+    for (path, size) in batch {
+        let hash = compute_file_hash(path)?;
+        upsert_file_hash(conn, path, &hash, *size)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    }
+
+    Ok(())
 }
